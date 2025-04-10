@@ -274,6 +274,12 @@ def block_compare(draft, live, similarity_threshold=0.9):
     draft_h1_index = next((i for i, block in enumerate(draft_blocks) if block.startswith('<h1>')), -1)
     live_h1_index = next((i for i, block in enumerate(live_blocks) if block.startswith('<h1>')), -1)
     
+    # Track total content and matched content for similarity calculation
+    # Only count content after H1 tags to exclude metadata
+    total_draft_length = sum(len(block) for block in draft_blocks[draft_h1_index:]) if draft_h1_index != -1 else sum(len(block) for block in draft_blocks)
+    total_live_length = sum(len(block) for block in live_blocks[live_h1_index:]) if live_h1_index != -1 else sum(len(block) for block in live_blocks)
+    matched_content_length = 0
+    
     # If we found H1s in both, align them
     if draft_h1_index != -1 and live_h1_index != -1:
         # Create aligned blocks with proper spacing
@@ -313,9 +319,12 @@ def block_compare(draft, live, similarity_threshold=0.9):
         if best_score >= similarity_threshold:
             matched_live.add(best_match)
             aligned.append(("matched", db, best_match))
+            # Add the matched content length weighted by the match score
+            matched_content_length += len(db) * best_score
         else:
             # If no good match, try to find partial matches
             partial_matches = []
+            partial_match_length = 0
             for lb in live_blocks:
                 if lb in matched_live:
                     continue
@@ -326,14 +335,17 @@ def block_compare(draft, live, similarity_threshold=0.9):
                 # Check if any sentences match
                 for ds in draft_sentences:
                     for ls in live_sentences:
-                        if difflib.SequenceMatcher(None, ds, ls).ratio() > 0.8:
+                        match_score = difflib.SequenceMatcher(None, ds, ls).ratio()
+                        if match_score > 0.8:  # Lower threshold for partial matches
                             partial_matches.append((ds, ls))
+                            partial_match_length += len(ds) * match_score
             
             if partial_matches:
                 # Combine partial matches into a single block
                 combined_live = " ".join(m[1] for m in partial_matches)
                 matched_live.add(combined_live)
                 aligned.append(("matched", db, combined_live))
+                matched_content_length += partial_match_length
             else:
                 aligned.append(("missing", db, best_match if best_match else ""))
 
@@ -342,7 +354,25 @@ def block_compare(draft, live, similarity_threshold=0.9):
         if lb not in matched_live:
             aligned.append(("current", "", lb))
 
-    return aligned
+    # Calculate the weighted similarity score with more emphasis on matched content
+    if total_draft_length == 0 or total_live_length == 0:
+        similarity = 0.0
+    else:
+        # Calculate individual similarities
+        draft_similarity = matched_content_length / total_draft_length
+        live_similarity = matched_content_length / total_live_length
+        
+        # Use the higher similarity score to give more weight to matched content
+        # Also consider the ratio of matched blocks to total blocks
+        matched_blocks = sum(1 for tag, _, _ in aligned if tag == "matched")
+        total_blocks = len(aligned)
+        block_similarity = matched_blocks / total_blocks if total_blocks > 0 else 0
+        
+        # Combine the content similarity and block similarity
+        similarity = max(draft_similarity, live_similarity) * 0.7 + block_similarity * 0.3
+    
+    # Return both the alignment results and the calculated similarity score
+    return aligned, similarity
 
 def format_result_as_html(docx_file, url, title, meta_desc, similarity, results):
     report = f"<h2>{docx_file} vs <a href='{url}'>{url}</a></h2>"
@@ -426,8 +456,10 @@ def run_batch_comparison():
                 report_md += f"## {docx_file} vs {url}\n❌ {live_text}\n\n"
                 summary.append(f"❌ {url}: Error")
                 continue
-            similarity = difflib.SequenceMatcher(None, draft_text, live_text).ratio()
-            diff = block_compare(draft_text, live_text)
+            
+            # Get both alignment results and similarity score from block_compare
+            diff, similarity = block_compare(draft_text, live_text)
+            
             html_report = format_result_as_html(docx_file, url, title, meta_desc, similarity, diff)
             markdown_report = format_result_as_markdown(docx_file, url, title, meta_desc, similarity, diff)
 
