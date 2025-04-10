@@ -59,54 +59,101 @@ def get_document_url_pairs(docx_files):
 
 def get_webpage_text(url):
     try:
-        response = requests.get(url)
+        # Add headers to mimic a browser request
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
+        
         soup = BeautifulSoup(response.text, "html.parser")
-        main = soup.find("main") or soup.find("body")
-        if not main:
-            return "", "Untitled Page", ""
-        title = soup.title.string.strip() if soup.title else "Untitled Page"
+        
+        # Get title
+        title = "Untitled Page"
+        if soup.title and soup.title.string:
+            title = soup.title.string.strip()
+        
+        # Get meta description
+        meta_description = ""
         meta_desc_tag = soup.find("meta", attrs={"name": "description"})
-        meta_description = meta_desc_tag["content"].strip() if meta_desc_tag and "content" in meta_desc_tag.attrs else ""
-
-        # Extract clean paragraphs while flattening inline tags
+        if meta_desc_tag and meta_desc_tag.get("content"):
+            meta_description = meta_desc_tag["content"].strip()
+        
+        # Try different content containers
+        content_containers = [
+            soup.find("main"),
+            soup.find("article"),
+            soup.find("div", {"class": ["content", "main-content", "page-content"]}),
+            soup.find("body")
+        ]
+        
+        main = next((container for container in content_containers if container is not None), None)
+        if not main:
+            return "[ERROR: Could not find main content area]", title, meta_description
+        
+        # Extract clean paragraphs while preserving structure
         paragraphs = []
-        for tag in main.find_all(["p", "li", "h1", "h2", "h3", "h4", "h5", "h6", "button"]):
-            # Detect <strong> at the start of a paragraph and split it out
-            strong = tag.find("strong")
-            if strong and tag.contents and tag.contents[0] == strong:
-                strong_text = strong.get_text(" ", strip=True)
-                strong.unwrap()
-                remainder_text = tag.get_text(" ", strip=True).replace(strong_text, "", 1).strip()
-                if strong_text:
-                    paragraphs.append(strong_text)
-                if remainder_text:
-                    paragraphs.append(remainder_text)
-            else:
-                for inline in tag.find_all(["a", "strong", "b", "em", "span"]):
-                    inline.unwrap()
-                text = tag.get_text(" ", strip=True)
-                if text:
+        for tag in main.find_all(["p", "li", "h1", "h2", "h3", "h4", "h5", "h6"]):
+            # Skip empty tags
+            if not tag.get_text(strip=True):
+                continue
+                
+            # Create a copy to work with
+            tag_copy = BeautifulSoup(str(tag), "html.parser")
+            
+            # Handle links by preserving their text
+            for a in tag_copy.find_all('a'):
+                if a.get_text(strip=True):
+                    a.unwrap()
+            
+            # Get the complete text of the element
+            text = tag_copy.get_text(" ", strip=True)
+            if text and len(text) > 1:
+                # Preserve heading tags
+                if tag.name.startswith('h'):
+                    paragraphs.append(f"<{tag.name}>{text}</{tag.name}>")
+                else:
                     paragraphs.append(text)
+        
+        if not paragraphs:
+            return "[ERROR: No content found on page]", title, meta_description
+            
+        # Join paragraphs with double newlines to preserve structure
         raw_text = "\n\n".join(paragraphs)
-        return normalize_html(raw_text), title, meta_description
+        return raw_text, title, meta_description
+        
+    except requests.exceptions.RequestException as e:
+        return f"[ERROR: Failed to fetch webpage: {str(e)}]", "Untitled Page", ""
     except Exception as e:
-        return f"[ERROR fetching webpage: {e}]", "Untitled Page", ""
+        return f"[ERROR: {str(e)}]", "Untitled Page", ""
 
 def get_docx_text(path):
     doc = Document(path)
-    return normalize_text("\n\n".join(p.text for p in doc.paragraphs if p.text.strip()))
+    paragraphs = []
+    for p in doc.paragraphs:
+        if p.text.strip():
+            # Preserve formatting for headings
+            if p.style.name.startswith('Heading'):
+                paragraphs.append(f"<h{p.style.name[-1]}>{p.text}</h{p.style.name[-1]}>")
+            else:
+                paragraphs.append(p.text)
+    return "\n\n".join(paragraphs)
 
 def normalize_text(text):
-    text = re.sub(r"</?h[1-6][^>]*>", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"<[^>]+>", "", text)
+    # Only normalize whitespace and line breaks, preserve the rest
     text = re.sub(r"\r", "", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"([a-zA-Z])\s*:\s+", r"\1: ", text)
     return text.strip()
 
 def normalize_html(text):
-    text = re.sub(r"</?a[^>]*>", "", text, flags=re.IGNORECASE)  # Strip anchor tags but preserve inner text
+    # First, preserve link text by unwrapping anchor tags
+    soup = BeautifulSoup(text, 'html.parser')
+    for a in soup.find_all('a'):
+        a.unwrap()
+    text = str(soup)
+    
+    # Then proceed with other normalizations
     text = re.sub(r"<ul.*?>", "", text)
     text = re.sub(r"</ul.*?>", "", text)
     text = re.sub(r"<li.*?>", "• ", text)
@@ -120,14 +167,41 @@ def split_into_blocks(text):
     return [block.strip() for block in text.split("\n\n") if block.strip()]
 
 def block_compare(draft, live, similarity_threshold=0.9):
+    # Split into blocks while preserving paragraph structure
     draft_blocks = split_into_blocks(draft)
     live_blocks = split_into_blocks(live)
+    
+    # Find the first H1 in both draft and live content
+    draft_h1_index = next((i for i, block in enumerate(draft_blocks) if block.startswith('<h1>')), -1)
+    live_h1_index = next((i for i, block in enumerate(live_blocks) if block.startswith('<h1>')), -1)
+    
+    # If we found H1s in both, align them
+    if draft_h1_index != -1 and live_h1_index != -1:
+        # Create aligned blocks with proper spacing
+        aligned = []
+        
+        # Add draft blocks before H1 as unmatched
+        for i in range(draft_h1_index):
+            aligned.append(("missing", draft_blocks[i], ""))
+        
+        # Add live blocks before H1 as current
+        for i in range(live_h1_index):
+            aligned.append(("current", "", live_blocks[i]))
+        
+        # Now match the remaining blocks starting from H1
+        draft_blocks = draft_blocks[draft_h1_index:]
+        live_blocks = live_blocks[live_h1_index:]
+    
+    # First pass: try to match complete paragraphs
     matched_live = set()
-    aligned = []
-
+    if 'aligned' not in locals():
+        aligned = []
+    
     for db in draft_blocks:
         best_match = None
         best_score = 0
+        
+        # Try to find the best matching block
         for lb in live_blocks:
             if lb in matched_live:
                 continue
@@ -135,17 +209,36 @@ def block_compare(draft, live, similarity_threshold=0.9):
             if score > best_score:
                 best_score = score
                 best_match = lb
-
+        
+        # If we have a good match, use it
         if best_score >= similarity_threshold:
             matched_live.add(best_match)
             aligned.append(("matched", db, best_match))
         else:
-            if best_match and best_score > 0.5:
-                matched_live.add(best_match)
-                aligned.append(("missing", db, best_match))
+            # If no good match, try to find partial matches
+            partial_matches = []
+            for lb in live_blocks:
+                if lb in matched_live:
+                    continue
+                # Split the live block into sentences
+                live_sentences = [s.strip() for s in lb.split('.') if s.strip()]
+                draft_sentences = [s.strip() for s in db.split('.') if s.strip()]
+                
+                # Check if any sentences match
+                for ds in draft_sentences:
+                    for ls in live_sentences:
+                        if difflib.SequenceMatcher(None, ds, ls).ratio() > 0.8:
+                            partial_matches.append((ds, ls))
+            
+            if partial_matches:
+                # Combine partial matches into a single block
+                combined_live = " ".join(m[1] for m in partial_matches)
+                matched_live.add(combined_live)
+                aligned.append(("matched", db, combined_live))
             else:
-                aligned.append(("missing", db, ""))
+                aligned.append(("missing", db, best_match if best_match else ""))
 
+    # Add any unmatched live blocks
     for lb in live_blocks:
         if lb not in matched_live:
             aligned.append(("current", "", lb))
@@ -158,12 +251,28 @@ def format_result_as_html(docx_file, url, title, meta_desc, similarity, results)
     report += f"<p><strong>Meta Description:</strong> {meta_desc}</p>"
     report += f"<p><strong>Similarity Score:</strong> {similarity:.2%}</p>"
     report += "<div style='display: flex; gap: 20px;'>"
+    
+    # Draft column
     report += "<div style='width: 50%;'><h3>Draft</h3><div style='white-space: pre-wrap;'>"
-    report += "".join([f"<div style='background:{'#e6ffe6' if tag == 'matched' else '#ffe6e6'}; margin-bottom: 10px;'>⬛ {draft}</div>" for tag, draft, live in results])
+    for tag, draft, live in results:
+        if tag in ['matched', 'missing']:
+            report += f"<div style='background:{'#e6ffe6' if tag == 'matched' else '#ffe6e6'}; margin-bottom: 10px; padding: 10px;'>{draft}</div>"
+        else:  # tag == 'current'
+            # Create an invisible div with the same content to maintain spacing
+            report += f"<div style='visibility: hidden; margin-bottom: 10px; padding: 10px;'>{live}</div>"
     report += "</div></div>"
+    
+    # Live column
     report += "<div style='width: 50%;'><h3>Live Webpage</h3><div style='white-space: pre-wrap;'>"
-    report += "".join([f"<div style='background:{'#e6ffe6' if tag == 'matched' else '#e6f0ff'}; margin-bottom: 10px;'>⬜ {live}</div>" for tag, draft, live in results])
-    report += "</div></div></div><hr>"
+    for tag, draft, live in results:
+        if tag in ['matched', 'current']:
+            report += f"<div style='background:{'#e6ffe6' if tag == 'matched' else '#e6f0ff'}; margin-bottom: 10px; padding: 10px;'>{live}</div>"
+        else:  # tag == 'missing'
+            # Create an invisible div with the same content to maintain spacing
+            report += f"<div style='visibility: hidden; margin-bottom: 10px; padding: 10px;'>{draft}</div>"
+    report += "</div></div>"
+    
+    report += "</div><hr>"
     return report
 
 def format_result_as_markdown(docx_file, url, title, meta_desc, similarity, results):
