@@ -9,6 +9,7 @@ A Python-based tool for comparing draft Word documents against live webpages, wi
   - Advanced content alignment using similarity matching
   - Special handling of H1 headings to ensure proper content structure alignment
   - Partial content matching for similar but not identical content
+  - Enhanced FAQ and structured content handling
 - **Visual Comparison Interface**:
   - Side-by-side comparison view
   - Color-coded content blocks:
@@ -34,11 +35,18 @@ A Python-based tool for comparing draft Word documents against live webpages, wi
   - HTML tag handling and cleaning
   - Link text preservation
   - Meta information extraction (title, description)
+  - Advanced structured content handling:
+    - UAGB FAQ blocks
+    - Generic FAQ sections
+    - Accordion components
+    - Expandable content sections
+    - ARIA-compliant interactive elements
 - **Comparison Algorithm**:
   - Primary similarity threshold of 90%
   - Secondary partial matching for similar content
   - Special handling of document structure elements
   - Intelligent block alignment based on H1 headings
+  - Improved duplicate detection and prevention
 
 ## Requirements
 
@@ -70,11 +78,24 @@ The tool generates several types of output:
 
 ## Recent Updates
 
-- Improved content alignment with H1 heading detection
-- Enhanced visual spacing in the comparison view
-- Perfect vertical alignment between draft and live content
-- Better handling of missing content with invisible spacers
-- Improved readability with consistent padding and margins
+- Enhanced FAQ and structured content handling:
+  - Support for UAGB FAQ blocks
+  - Better detection of accordion sections
+  - Improved question-answer pairing
+  - Section heading preservation
+- Improved content alignment:
+  - Better H1 heading detection and alignment
+  - Enhanced visual spacing in comparison view
+  - Perfect vertical alignment between draft and live content
+  - Better handling of missing content with invisible spacers
+- Enhanced error handling:
+  - Robust web request handling
+  - Better malformed HTML handling
+  - Clear error messages in reports
+- Performance improvements:
+  - Better duplicate content detection
+  - Optimized content extraction
+  - Improved memory usage
 
 ## License
 MIT License

@@ -59,7 +59,6 @@ def get_document_url_pairs(docx_files):
 
 def get_webpage_text(url):
     try:
-        # Add headers to mimic a browser request
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
@@ -93,9 +92,18 @@ def get_webpage_text(url):
         
         # Extract clean paragraphs while preserving structure
         paragraphs = []
+        
+        # First, handle regular content
         for tag in main.find_all(["p", "li", "h1", "h2", "h3", "h4", "h5", "h6"]):
             # Skip empty tags
             if not tag.get_text(strip=True):
+                continue
+                
+            # Skip if inside structured content section to avoid duplication
+            if tag.find_parent(class_=lambda x: x and any(keyword in str(x).lower() for keyword in [
+                'faq', 'accordion', 'expandable', 'collapse', 'toggle',
+                'uagb-faq', 'uagb-container', 'wp-block-uagb'
+            ])):
                 continue
                 
             # Create a copy to work with
@@ -114,6 +122,97 @@ def get_webpage_text(url):
                     paragraphs.append(f"<{tag.name}>{text}</{tag.name}>")
                 else:
                     paragraphs.append(text)
+        
+        # Then, handle structured content sections
+        structured_content_patterns = [
+            # UAGB FAQ patterns
+            {'class_': lambda x: x and any(c for c in str(x).split() if c.startswith('uagb-faq'))},
+            {'class_': lambda x: x and any(c for c in str(x).split() if c.startswith('wp-block-uagb-faq'))},
+            # Generic FAQ patterns
+            {'class_': lambda x: x and any(keyword in str(x).lower() for keyword in ['faq', 'frequently-asked'])},
+            # Accordion patterns
+            {'class_': lambda x: x and any(keyword in str(x).lower() for keyword in ['accordion', 'expandable', 'collapse'])},
+            # ARIA patterns
+            {'role': 'tablist'},
+            {'role': 'tab'},
+            # Container patterns
+            {'class_': lambda x: x and 'uagb-container-inner-blocks-wrap' in str(x)}
+        ]
+        
+        # Find all structured content sections
+        structured_sections = []
+        for pattern in structured_content_patterns:
+            sections = main.find_all(**pattern)
+            structured_sections.extend(sections)
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        structured_sections = [x for x in structured_sections if not (str(x) in seen or seen.add(str(x)))]
+        
+        # Process each structured section
+        for section in structured_sections:
+            # Try to find a section heading first
+            section_heading = section.find(class_=lambda x: x and 'uagb-heading-text' in str(x))
+            if section_heading and section_heading.get_text(strip=True):
+                paragraphs.append(f"<h2>{section_heading.get_text(strip=True)}</h2>")
+            
+            # Find all question/answer pairs using multiple approaches
+            qa_pairs = []
+            
+            # Method 1: UAGB FAQ structure
+            questions = section.find_all(class_='uagb-question')
+            for question in questions:
+                # Get the FAQ item container
+                faq_item = question.find_parent(class_=lambda x: x and 'uagb-faq-item' in str(x))
+                if faq_item:
+                    # Find the answer within this FAQ item
+                    answer = faq_item.find(class_='uagb-faq-content')
+                    if answer:
+                        q_text = ' '.join(question.stripped_strings)
+                        a_text = ' '.join(answer.stripped_strings)
+                        if q_text and a_text:
+                            qa_pairs.append((q_text, a_text))
+            
+            # Method 2: Generic FAQ/Accordion structure
+            if not qa_pairs:
+                questions = section.find_all(lambda tag: (
+                    tag.name in ['dt', 'summary'] or
+                    (tag.get('class') and any(c for c in tag.get('class', []) if any(keyword in c.lower() for keyword in ['question', 'header', 'title', 'summary']))) or
+                    tag.get('role') == 'tab'
+                ))
+                
+                for question in questions:
+                    q_text = ' '.join(question.stripped_strings)
+                    if not q_text:
+                        continue
+                    
+                    # Try to find the corresponding answer
+                    answer = None
+                    
+                    # Check for next sibling first
+                    answer = question.find_next_sibling(lambda tag: (
+                        tag.name == 'dd' or
+                        (tag.get('class') and any(c for c in tag.get('class', []) if any(keyword in c.lower() for keyword in ['answer', 'content', 'panel', 'body']))) or
+                        tag.get('role') == 'tabpanel'
+                    ))
+                    
+                    # If no sibling found, try parent's next element
+                    if not answer and question.parent:
+                        answer = question.parent.find_next(lambda tag: (
+                            tag.name == 'dd' or
+                            (tag.get('class') and any(c for c in tag.get('class', []) if any(keyword in c.lower() for keyword in ['answer', 'content', 'panel', 'body']))) or
+                            tag.get('role') == 'tabpanel'
+                        ))
+                    
+                    if answer:
+                        a_text = ' '.join(answer.stripped_strings)
+                        if a_text:
+                            qa_pairs.append((q_text, a_text))
+            
+            # Add all found Q&A pairs to paragraphs
+            for q_text, a_text in qa_pairs:
+                paragraphs.append(f"Q: {q_text}")
+                paragraphs.append(f"A: {a_text}")
         
         if not paragraphs:
             return "[ERROR: No content found on page]", title, meta_description
